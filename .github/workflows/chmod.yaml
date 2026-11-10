@@ -18,7 +18,7 @@ jobs:
       - name: Ensure executable files
         shell: bash
         run: |
-          for _p in docker/manage.py
+          for _p in docker/entrypoint.sh docker/manage.py
           do
             if [[ -f "${_p}" ]]
             then
