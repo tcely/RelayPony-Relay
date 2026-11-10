@@ -3,23 +3,21 @@ from django.db import models
 
 class SignalBlob(models.Model):
     id = models.BigAutoField(primary_key=True)
-    recipient = models.CharField(max_length=128)
+    recipient = models.CharField(max_length=128, db_index=True)
     payload = models.TextField()
-    expires_at = models.DateTimeField()
+    expires_at = models.DateTimeField(db_index=True)
 
     class Meta:
         db_table = "relaypony_signal"
-        managed = False
 
 
 class RelayDatum(models.Model):
     id = models.BigAutoField(primary_key=True)
-    recipient = models.CharField(max_length=128)
-    session = models.CharField(max_length=64)
+    recipient = models.CharField(max_length=128, db_index=True)
+    session = models.CharField(max_length=64, db_index=True)
     payload = models.TextField()
-    expires_at = models.DateTimeField()
+    expires_at = models.DateTimeField(db_index=True)
 
     class Meta:
         db_table = "relaypony_relaydata"
-        managed = False
 
