@@ -29,9 +29,7 @@ jobs:
       - name: Commit changes
         uses: stefanzweifel/git-auto-commit-action@v7
         with:
-          add_options: '-u'
           branch: 'ci-chmod'
           create_branch: true
-          skip_dirty_check: true
           commit_message: 'chore: force files to be executable'
 
