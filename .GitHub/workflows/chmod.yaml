@@ -1,0 +1,33 @@
+name: chmod executables
+
+on:
+  push:
+    branches:
+      - tcely-main
+
+jobs:
+  chmod:
+    runs-on: ubuntu-slim
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+
+      - name: Ensure executable files
+        shell: bash
+        run: |
+          for _p in docker/manage.py
+          do
+            if [[ -f "${_p}" ]]
+            then
+              [[ -x "${_p}" ]] || git update-index --chmod=+x "${_p}"
+            fi
+          done
+
+      - name: Commit changes
+        uses: stefanzweifel/git-auto-commit-action@v7
+        with:
+          commit_message: 'chore: force files to be executable'
+
