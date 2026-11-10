@@ -22,7 +22,7 @@ jobs:
           do
             if [[ -f "${_p}" ]]
             then
-              [[ -x "${_p}" ]] || git update-index --chmod=+x "${_p}"
+              [[ -x "${_p}" ]] || chmod -v a+rx "${_p}" && git add "${_p}"
             fi
           done
 
