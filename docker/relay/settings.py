@@ -11,6 +11,7 @@ from signaling import settings as _signaling_settings
 BASE_DIR = Path(__file__).resolve().parent.parent
 
 SECRET_KEY = os.getenv('DJANGO_SECRET_KEY', None)
+RELAY_RATE_LIMIT_SALT = os.getenv('RELAY_RATE_LIMIT_SALT', None)
 DEBUG = '1' == os.getenv('DJANGO_DEBUG', '0')
 DB_ENGINE = os.getenv('DB_ENGINE', 'default').lower()
 ALLOWED_HOSTS = [h for h in os.getenv('DJANGO_ALLOWED_HOSTS', 'localhost').split(',') if h]
@@ -39,6 +40,10 @@ MIDDLEWARE = [
 
 ROOT_URLCONF = 'relay.urls'
 WSGI_APPLICATION = 'relay.wsgi.application'
+
+RATE_SALT = SECRET_KEY
+if RELAY_RATE_LIMIT_SALT is not None:
+    RATE_LIMIT_SALT = RATE_SALT = RELAY_RATE_LIMIT_SALT
 
 if SECRET_KEY is None:
     raise ImproperlyConfigured('DJANGO_SECRET_KEY must be provided with the environment variables!')
