@@ -27,3 +27,23 @@ class RelayDatum(models.Model):
             models.Index(fields=["recipient", "session", "expires_at"]),
         ]
 
+
+class RateLimit(models.Model):
+    id = models.BigAutoField(primary_key=True)
+    bucket = models.CharField(max_length=64)   # sha256(salt | ip), hex
+    op = models.CharField(max_length=16)
+    at = models.DateTimeField()
+
+    class Meta:
+        db_table = 'relaypony_ratelimit'
+
+
+class Nameplate(models.Model):
+    nameplate = models.PositiveIntegerField(primary_key=True)
+    token = models.CharField(max_length=64)
+    created_at = models.DateTimeField(auto_now_add=True)
+    expires_at = models.DateTimeField()
+
+    class Meta:
+        db_table = 'relaypony_nameplate'
+
