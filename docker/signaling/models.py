@@ -27,3 +27,9 @@ class RelayDatum(models.Model):
             models.Index(fields=["recipient", "session", "expires_at"]),
         ]
 
+
+class Nameplate(models.Model):
+    number = models.PositiveSmallIntegerField(unique=True)  # 1..9999 fits
+    token_hash = models.CharField(max_length=64)            # sha256 hex of the token
+    expires_at = models.DateTimeField(db_index=True)
+
