@@ -12,9 +12,9 @@ import time
 from datetime import datetime, timedelta
 from typing import TypeAlias
 
-from django.core.cache import cache
+from django.core.cache import InvalidCacheBackendError, caches
 from django.core.exceptions import RequestDataTooBig
-from django.db import DatabaseError, IntegrityError, transaction
+from django.db import DatabaseError, IntegrityError, OperationalError, transaction
 from django.http import JsonResponse
 from django.utils import timezone
 from django.views.decorators.csrf import csrf_exempt
@@ -155,14 +155,21 @@ def _rate_limited(request, op: str) -> bool:
     limit = _int(settings.RATE_LIMITS, op)
     if 0 == limit:
         return False
+
+    try:
+        cache = caches['signaling']
+    except InvalidCacheBackendError:
+        return False  # alias not configured in settings.CACHES; fail open
+
     window = max(2, settings.RATE_WINDOW_SECONDS)
     near_time = TIME_BASE_EPOCH + (time.monotonic() - TIME_BASE_MONOTONIC)
     bucket = int(near_time // window)
     key = f'rl:{op}:{bucket}:{_client_hash(request)}'
-    cache.add(key, 0, timeout=(1 + window))
+
     try:
+        cache.add(key, 0, timeout=(1 + window))
         count = cache.incr(key)
-    except ValueError:  # evicted between add and incr; fail open
+    except (ValueError, OperationalError):
         return False
     return count > limit
 
