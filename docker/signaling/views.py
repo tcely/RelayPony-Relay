@@ -28,27 +28,15 @@ Data: TypeAlias = dict[str, int | str | list[str]]
 
 B64_RE = re.compile(r'^[A-Za-z0-9+/]+[=]*$')
 HANDLE_RE = re.compile(r'age1[0-9a-z]{20,120}')
+MBOX_ID_RE = re.compile(r'[A-Za-z0-9_-]{43}')
 SESSION_RE = re.compile(r'[0-9a-f]{8,64}')
 
 VERSION = '2.0'
 FEATURES = ['mbox', 'nameplate', 'sealed', 'ratelimit']
 
-MBOX_ID_RE = re.compile(r'[A-Za-z0-9_-]{43}')
-MBOX_MAX_PAYLOAD = 16 * 1024  # decoded bytes
-
-NAMEPLATE_TTL = timedelta(seconds=600)
 NAMEPLATE_SMALL_POOL = 999
 NAMEPLATE_FULL_POOL = 9999
 NAMEPLATE_TRIES = 20
-
-RATE_WINDOW_SECONDS = 60
-RATE_LIMITS = {
-    'send': 300,
-    'poll': 300,
-    'mbox.send': 300,
-    'mbox.poll': 300,
-    'nameplate.claim': 20,
-}
 
 log = logging.getLogger(__name__)
 
@@ -64,16 +52,19 @@ def _max_body_bytes() -> int:
 def _read_json_body(request) -> dict | JsonResponse:
     max_bytes = _max_body_bytes()
 
-    content_length = request.META.get('CONTENT_LENGTH')
-    if content_length:
+    content_length = request.META.get('CONTENT_LENGTH', None)
+    if content_length is not None:
+        content_length_int = 0
         try:
-            if int(content_length) > max_bytes:
-                return fail(413, 'payload_too_large')
-        except ValueError:
-            return fail(400, 'bad_json')
+            content_length_int = int(content_length)
+        except (TypeError, ValueError):
+            pass
+
+        if max_bytes < content_length_int:
+            return fail(413, 'payload_too_large')
 
     try:
-        raw = request.read(max_bytes + 1)
+        raw = request.read(1 + max_bytes)
     except RequestDataTooBig:
         return fail(413, 'payload_too_large')
 
@@ -110,6 +101,16 @@ def fail(status: int, msg: str) -> JsonResponse:
     return JsonResponse({'ok': False, 'error': msg}, status=status)
 
 
+def _int(data: Data, key: str) -> int:
+    if not isinstance(data, dict):
+        return 0
+    value = data.get(key, 0)
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
+
+
 def _text(data: Data, key: str, strip: bool = True) -> str:
     if not isinstance(data, dict):
         return ''
@@ -124,19 +125,21 @@ def _is_mailbox_id(value: str) -> bool:
     if not MBOX_ID_RE.fullmatch(value):
         return False
     try:
-        return len(base64.urlsafe_b64decode(value + '=')) == 32
+        return 32 == len(base64.urlsafe_b64decode(value + '='))
     except (binascii.Error, ValueError):
         return False
 
 
-def _decode_payload(payload: str) -> bytes | None:
+def _valid_payload(payload: str, decoded: bool = False) -> bytes | None:
     if not B64_RE.fullmatch(payload):
-        return None
+        return
+    if not decoded:
+        return payload if 0 < len(payload) <= settings.MBOX_MAX_PAYLOAD else None
     try:
         raw = base64.b64decode(payload, validate=True)
     except binascii.Error:
-        return None
-    return raw if 0 < len(raw) <= MBOX_MAX_PAYLOAD else None
+        return
+    return raw if 0 < len(raw) <= settings.MBOX_MAX_PAYLOAD else None
 
 
 def _client_hash(request) -> str:
@@ -146,12 +149,12 @@ def _client_hash(request) -> str:
 
 
 def _rate_limited(request, op: str) -> bool:
-    limit = RATE_LIMITS.get(op)
+    limit = settings.RATE_LIMITS.get(op, None)
     if limit is None:
         return False
-    bucket = int(time.monotonic()) // RATE_WINDOW_SECONDS
+    bucket = int(time.monotonic()) // settings.RATE_WINDOW_SECONDS
     key = f'rl:{op}:{bucket}:{_client_hash(request)}'
-    cache.add(key, 0, timeout=RATE_WINDOW_SECONDS)
+    cache.add(key, 0, timeout=settings.RATE_WINDOW_SECONDS)
     try:
         count = cache.incr(key)
     except ValueError:  # evicted between add and incr; fail open
@@ -269,7 +272,7 @@ def _mbox_send(data: Data, now: datetime) -> JsonResponse:
         return fail(422, 'bad_recipient')
 
     payload = _text(data, 'payload', strip=False)
-    if _decode_payload(payload) is None:
+    if _valid_payload(payload) is None:
         return fail(422, 'bad_payload')
 
     signal_expires = now + timedelta(seconds=settings.SIGNAL_TTL_SECONDS)
@@ -302,6 +305,7 @@ def _nameplate_claim(data: Data, now: datetime) -> JsonResponse:
     pool_max = NAMEPLATE_SMALL_POOL if in_use * 2 < NAMEPLATE_SMALL_POOL else NAMEPLATE_FULL_POOL
     token = secrets.token_urlsafe(24)
 
+    nameplate_expires = now + timedelta(seconds=settings.NAMEPLATE_TTL_SECONDS)
     for _ in range(NAMEPLATE_TRIES):
         number = 1 + secrets.randbelow(pool_max)
         # Check every row, not just live ones: an expired row still holds the
@@ -310,12 +314,18 @@ def _nameplate_claim(data: Data, now: datetime) -> JsonResponse:
             continue
         try:
             with transaction.atomic(durable=True):
-                RelayDatum.objects.create(
+                # Switched to get_or_create because of how RelayDatum is defined
+                # The original used create and depended on a unique constraint.
+                _, created = RelayDatum.objects.get_or_create(
                     recipient=str(number),
-                    session=_token_hash(token),
-                    payload='nameplate',
-                    expires_at=now + NAMEPLATE_TTL,
+                    defaults=dict(
+                        session=_token_hash(token),
+                        payload='nameplate',
+                        expires_at=nameplate_expires,
+                    ),
                 )
+                if not created:
+                    continue
         except IntegrityError:  # lost a race for this number; try another
             continue
         return ok(nameplate=number, token=token, ttl=int(NAMEPLATE_TTL.total_seconds()))
