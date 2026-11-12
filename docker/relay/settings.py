@@ -50,16 +50,18 @@ CACHES = {
     'database': {
         'BACKEND': 'django.core.cache.backends.db.DatabaseCache',
         'LOCATION': 'django_cache_table',
+        'KEY_PREFIX': 'default_',
         'OPTIONS': {
             'MAX_ENTRIES': 10_000,
             'CULL_FREQUENCY': 3,
         },
     }
 }
-CACHES['signaling'] = {}.update(CACHES['database'], {
-    'OPTIONS': dict(CACHES['database']['OPTIONS']),
-    'KEY_PREFIX': 'relay_signaling_',
-}
+CACHES['signaling'] = dict(
+    CACHES['database'],
+    OPTIONS=dict(CACHES['database']['OPTIONS']),
+    KEY_PREFIX='relay_signaling_',
+)
 
 DATABASES = {
     'sqlite': {
