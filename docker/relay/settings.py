@@ -43,10 +43,21 @@ WSGI_APPLICATION = 'relay.wsgi.application'
 if SECRET_KEY is None:
     raise ImproperlyConfigured('DJANGO_SECRET_KEY must be provided with the environment variables!')
 
+CACHES = {
+    'signaling': {
+        'BACKEND': 'django.core.cache.backends.db.DatabaseCache',
+        'LOCATION': 'django_cache_table',
+        'OPTIONS': {
+            'MAX_ENTRIES': 10_000,
+            'CULL_FREQUENCY': 3,
+        },
+    }
+}
+
 DATABASES = {
     'sqlite': {
         'ENGINE': 'django.db.backends.sqlite3',
-        'NAME': os.getenv('SQLITE_PATH', str(BASE_DIR / 'data' / 'db.sqlite3')),
+        'NAME': os.getenv('SQLITE_DB_PATH', str(BASE_DIR / 'data' / 'db.sqlite3')),
         'OPTIONS': {
             # Take the write lock at BEGIN, avoiding "database is locked"
             # errors when a deferred transaction tries to upgrade to a write.
@@ -60,7 +71,25 @@ DATABASES = {
                     PRAGMA auto_vacuum = INCREMENTAL;
                 """,
         },
-    }
+    },
+    'cache': {
+        'ENGINE': 'django.db.backends.sqlite3',
+        'NAME': os.getenv('SQLITE_CACHE_PATH', str(BASE_DIR / 'data' / 'cache.sqlite3')),
+        'OPTIONS': {
+            'transaction_mode': 'IMMEDIATE',
+            'timeout': 20,
+            'init_command': """
+                    PRAGMA locking_mode = NORMAL;
+                    PRAGMA synchronous = NORMAL;
+                    PRAGMA journal_mode = WAL;
+                    PRAGMA journal_size_limit = 67108864;
+                    PRAGMA legacy_alter_table = OFF;
+                    PRAGMA mmap_size = 134217728;
+                    PRAGMA temp_store = MEMORY;
+                    PRAGMA auto_vacuum = FULL;
+                """,
+        },
+    },
 }
 if DB_ENGINE in ('default', 'sqlite', 'sqlite3'):
     DATABASES['default'] = DATABASES['sqlite']
@@ -96,6 +125,7 @@ if DATABASES['default'].get('PORT'):
     ))
     if not DATABASES['default']['DB_PASSWORD']:
         raise ImproperlyConfigured('DB_PASSWORD must be provided with the environment variables!')
+DATABASE_ROUTERS = ['relay.routers.CacheRouter']
 
 USE_TZ = True
 TIME_ZONE = 'UTC'
