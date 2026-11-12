@@ -21,10 +21,10 @@ from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_POST
 
 from ._settings import MAX_TAKE_CEILING, settings, validated_max_batch
-from .models import Nameplate, RelayDatum, SignalBlob
+from .models import RelayDatum, SignalBlob
 
 
-Data: TypeAlias = dict[str, str | list[str]]
+Data: TypeAlias = dict[str, int | str | list[str]]
 
 B64_RE = re.compile(r'^[A-Za-z0-9+/]+[=]*$')
 HANDLE_RE = re.compile(r'age1[0-9a-z]{20,120}')
@@ -34,7 +34,7 @@ VERSION = '2.0'
 FEATURES = ['mbox', 'nameplate', 'sealed', 'ratelimit']
 
 MBOX_ID_RE = re.compile(r'[A-Za-z0-9_-]{43}')
-MBOX_MAX_PAYLOAD = 16 * 1024  # decoded bytes; see notes
+MBOX_MAX_PAYLOAD = 16 * 1024  # decoded bytes
 
 NAMEPLATE_TTL = timedelta(seconds=600)
 NAMEPLATE_SMALL_POOL = 999
@@ -149,7 +149,7 @@ def _rate_limited(request, op: str) -> bool:
     limit = RATE_LIMITS.get(op)
     if limit is None:
         return False
-    bucket = int(time.time()) // RATE_WINDOW_SECONDS
+    bucket = int(time.monotonic()) // RATE_WINDOW_SECONDS
     key = f'rl:{op}:{bucket}:{_client_hash(request)}'
     cache.add(key, 0, timeout=RATE_WINDOW_SECONDS)
     try:
@@ -165,7 +165,7 @@ def _token_hash(token: str) -> str:
 
 def _reap(now: datetime) -> None:
     """Drop expired rows. Non-fatal, matching the PHP version."""
-    for model in (SignalBlob, RelayDatum, Nameplate):
+    for model in (SignalBlob, RelayDatum):
         try:
             _expired(model.objects.all(), now).delete()
         except DatabaseError:
@@ -292,22 +292,28 @@ def _mbox_poll(data: Data, now: datetime) -> JsonResponse:
 
 
 def _nameplate_claim(data: Data, now: datetime) -> JsonResponse:
-    in_use = Nameplate.objects.filter(expires_at__gte=now).count()
+    in_use = RelayDatum.objects.filter(
+        recipient__gte='1',
+        recipient__lte='9999',
+        payload='nameplate',
+        expires_at__gte=now,
+    ).count()
     # 1..999 while fewer than half of that pool is in use, then 1..9999
     pool_max = NAMEPLATE_SMALL_POOL if in_use * 2 < NAMEPLATE_SMALL_POOL else NAMEPLATE_FULL_POOL
     token = secrets.token_urlsafe(24)
 
     for _ in range(NAMEPLATE_TRIES):
-        number = secrets.randbelow(pool_max) + 1
+        number = 1 + secrets.randbelow(pool_max)
         # Check every row, not just live ones: an expired row still holds the
         # unique slot until _reap deletes it.
-        if Nameplate.objects.filter(number=number).exists():
+        if RelayDatum.objects.filter(recipient=str(number)).exists():
             continue
         try:
             with transaction.atomic(durable=True):
-                Nameplate.objects.create(
-                    number=number,
-                    token_hash=_token_hash(token),
+                RelayDatum.objects.create(
+                    recipient=str(number),
+                    session=_token_hash(token),
+                    payload='nameplate',
                     expires_at=now + NAMEPLATE_TTL,
                 )
         except IntegrityError:  # lost a race for this number; try another
@@ -326,10 +332,10 @@ def _nameplate_release(data: Data, now: datetime) -> JsonResponse:
     if not token:
         return fail(422, 'bad_token')
 
-    row = Nameplate.objects.filter(number=number).first()
+    row = RelayDatum.objects.filter(recipient=str(number)).first()
     if row is None:  # already gone; releasing is idempotent
         return ok()
-    if not hmac.compare_digest(row.token_hash, _token_hash(token)):
+    if not hmac.compare_digest(row.session, _token_hash(token)):
         return fail(403, 'bad_token')
     row.delete()
     return ok()
