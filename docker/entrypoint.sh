@@ -17,6 +17,8 @@ then
     su --preserve-environment -s /app/entrypoint.sh -- "${next_user}" "$@"
 fi
 
+/app/manage.py createcachetable
+
 /app/manage.py migrate --noinput
 
 exec "$@"
