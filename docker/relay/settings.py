@@ -10,6 +10,7 @@ from signaling import settings as _signaling_settings
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
+RATE_SALT = os.getenv('RELAY_RATE_SALT', '')
 SECRET_KEY = os.getenv('DJANGO_SECRET_KEY', None)
 DEBUG = '1' == os.getenv('DJANGO_DEBUG', '0')
 DB_ENGINE = os.getenv('DB_ENGINE', 'default').lower()
@@ -39,6 +40,9 @@ MIDDLEWARE = [
 
 ROOT_URLCONF = 'relay.urls'
 WSGI_APPLICATION = 'relay.wsgi.application'
+
+if RATE_SALT in ('', 'CHANGE_ME_TO_A_RANDOM_STRING'):
+    raise ImproperlyConfigured('RELAY_RATE_SALT must be set to a long random string')
 
 if SECRET_KEY is None:
     raise ImproperlyConfigured('DJANGO_SECRET_KEY must be provided with the environment variables!')
