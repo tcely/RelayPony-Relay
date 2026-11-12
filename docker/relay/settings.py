@@ -44,6 +44,9 @@ if SECRET_KEY is None:
     raise ImproperlyConfigured('DJANGO_SECRET_KEY must be provided with the environment variables!')
 
 CACHES = {
+    'default': {
+        'BACKEND': 'django.core.cache.backends.locmem.LocMemCache',
+    },
     'signaling': {
         'BACKEND': 'django.core.cache.backends.db.DatabaseCache',
         'LOCATION': 'django_cache_table',
