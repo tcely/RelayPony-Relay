@@ -1,20 +1,27 @@
+import base64
+import binascii
 import contextlib
+import hashlib
+import hmac
 import json
 import logging
 import re
+import secrets
+import time
 
 from datetime import datetime, timedelta
 from typing import TypeAlias
 
+from django.core.cache import cache
 from django.core.exceptions import RequestDataTooBig
-from django.db import DatabaseError, transaction
+from django.db import DatabaseError, IntegrityError, transaction
 from django.http import JsonResponse
 from django.utils import timezone
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_POST
 
 from ._settings import MAX_TAKE_CEILING, settings, validated_max_batch
-from .models import RelayDatum, SignalBlob
+from .models import Nameplate, RelayDatum, SignalBlob
 
 
 Data: TypeAlias = dict[str, str | list[str]]
@@ -22,6 +29,26 @@ Data: TypeAlias = dict[str, str | list[str]]
 B64_RE = re.compile(r'^[A-Za-z0-9+/]+[=]*$')
 HANDLE_RE = re.compile(r'age1[0-9a-z]{20,120}')
 SESSION_RE = re.compile(r'[0-9a-f]{8,64}')
+
+VERSION = '2.0'
+FEATURES = ['mbox', 'nameplate', 'sealed', 'ratelimit']
+
+MBOX_ID_RE = re.compile(r'[A-Za-z0-9_-]{43}')
+MBOX_MAX_PAYLOAD = 16 * 1024  # decoded bytes; see notes
+
+NAMEPLATE_TTL = timedelta(seconds=600)
+NAMEPLATE_SMALL_POOL = 999
+NAMEPLATE_FULL_POOL = 9999
+NAMEPLATE_TRIES = 20
+
+RATE_WINDOW_SECONDS = 60
+RATE_LIMITS = {
+    'send': 300,
+    'poll': 300,
+    'mbox.send': 300,
+    'mbox.poll': 300,
+    'nameplate.claim': 20,
+}
 
 log = logging.getLogger(__name__)
 
@@ -92,9 +119,53 @@ def _text(data: Data, key: str, strip: bool = True) -> str:
     return value.strip() if strip else value
 
 
+def _is_mailbox_id(value: str) -> bool:
+    """43 base64url characters that decode to exactly 32 bytes."""
+    if not MBOX_ID_RE.fullmatch(value):
+        return False
+    try:
+        return len(base64.urlsafe_b64decode(value + '=')) == 32
+    except (binascii.Error, ValueError):
+        return False
+
+
+def _decode_payload(payload: str) -> bytes | None:
+    if not B64_RE.fullmatch(payload):
+        return None
+    try:
+        raw = base64.b64decode(payload, validate=True)
+    except binascii.Error:
+        return None
+    return raw if 0 < len(raw) <= MBOX_MAX_PAYLOAD else None
+
+
+def _client_hash(request) -> str:
+    salt = getattr(settings, 'RATE_LIMIT_SALT', settings.SECRET_KEY)
+    ip = request.META.get('REMOTE_ADDR', '')
+    return hmac.new(salt.encode(), ip.encode(), hashlib.sha256).hexdigest()
+
+
+def _rate_limited(request, op: str) -> bool:
+    limit = RATE_LIMITS.get(op)
+    if limit is None:
+        return False
+    bucket = int(time.time()) // RATE_WINDOW_SECONDS
+    key = f'rl:{op}:{bucket}:{_client_hash(request)}'
+    cache.add(key, 0, timeout=RATE_WINDOW_SECONDS)
+    try:
+        count = cache.incr(key)
+    except ValueError:  # evicted between add and incr; fail open
+        return False
+    return count > limit
+
+
+def _token_hash(token: str) -> str:
+    return hashlib.sha256(token.encode()).hexdigest()
+
+
 def _reap(now: datetime) -> None:
     """Drop expired rows. Non-fatal, matching the PHP version."""
-    for model in (SignalBlob, RelayDatum):
+    for model in (SignalBlob, RelayDatum, Nameplate):
         try:
             _expired(model.objects.all(), now).delete()
         except DatabaseError:
@@ -188,7 +259,93 @@ def _fetch(data: Data, now: datetime) -> JsonResponse:
     return ok(chunks=[r.payload for r in rows])
 
 
-HANDLERS = dict(send=_send, poll=_poll, data=_data, fetch=_fetch)
+def _info(data: Data, now: datetime) -> JsonResponse:
+    return ok(version=VERSION, features=FEATURES)
+
+
+def _mbox_send(data: Data, now: datetime) -> JsonResponse:
+    to = _text(data, 'to')
+    if not _is_mailbox_id(to):
+        return fail(422, 'bad_recipient')
+
+    payload = _text(data, 'payload', strip=False)
+    if _decode_payload(payload) is None:
+        return fail(422, 'bad_payload')
+
+    signal_expires = now + timedelta(seconds=settings.SIGNAL_TTL_SECONDS)
+    with transaction.atomic(durable=True):
+        qs = _unexpired(SignalBlob.objects.filter(recipient=to), now)
+        if _queue_full(qs, maximum=settings.SIGNAL_MAX_QUEUE):
+            return fail(429, 'queue_full')
+        SignalBlob.objects.create(recipient=to, payload=payload, expires_at=signal_expires)
+    return ok()
+
+
+def _mbox_poll(data: Data, now: datetime) -> JsonResponse:
+    handle = _text(data, 'for')
+    if not _is_mailbox_id(handle):
+        return fail(422, 'bad_recipient')
+
+    qs = _unexpired(SignalBlob.objects.filter(recipient=handle), now)
+    rows = _take(qs, settings.SIGNAL_POLL_LIMIT)
+    return ok(blobs=[r.payload for r in rows])
+
+
+def _nameplate_claim(data: Data, now: datetime) -> JsonResponse:
+    in_use = Nameplate.objects.filter(expires_at__gte=now).count()
+    # 1..999 while fewer than half of that pool is in use, then 1..9999
+    pool_max = NAMEPLATE_SMALL_POOL if in_use * 2 < NAMEPLATE_SMALL_POOL else NAMEPLATE_FULL_POOL
+    token = secrets.token_urlsafe(24)
+
+    for _ in range(NAMEPLATE_TRIES):
+        number = secrets.randbelow(pool_max) + 1
+        # Check every row, not just live ones: an expired row still holds the
+        # unique slot until _reap deletes it.
+        if Nameplate.objects.filter(number=number).exists():
+            continue
+        try:
+            with transaction.atomic(durable=True):
+                Nameplate.objects.create(
+                    number=number,
+                    token_hash=_token_hash(token),
+                    expires_at=now + NAMEPLATE_TTL,
+                )
+        except IntegrityError:  # lost a race for this number; try another
+            continue
+        return ok(nameplate=number, token=token, ttl=int(NAMEPLATE_TTL.total_seconds()))
+
+    return fail(503, 'nameplates_exhausted')
+
+
+def _nameplate_release(data: Data, now: datetime) -> JsonResponse:
+    number = data.get('nameplate')
+    if type(number) is not int or not 1 <= number <= NAMEPLATE_FULL_POOL:
+        return fail(422, 'bad_nameplate')
+
+    token = _text(data, 'token', strip=False)
+    if not token:
+        return fail(422, 'bad_token')
+
+    row = Nameplate.objects.filter(number=number).first()
+    if row is None:  # already gone; releasing is idempotent
+        return ok()
+    if not hmac.compare_digest(row.token_hash, _token_hash(token)):
+        return fail(403, 'bad_token')
+    row.delete()
+    return ok()
+
+
+HANDLERS = {
+    'info': _info,
+    'send': _send,
+    'poll': _poll,
+    'data': _data,
+    'fetch': _fetch,
+    'mbox.send': _mbox_send,
+    'mbox.poll': _mbox_poll,
+    'nameplate.claim': _nameplate_claim,
+    'nameplate.release': _nameplate_release,
+}
 
 
 @csrf_exempt
@@ -206,6 +363,8 @@ def signal(request):
         handler = HANDLERS.get(op, None)
         if handler is None:
             return fail(400, 'bad_op')
+        if _rate_limited(request, op):
+            return fail(429, 'rate_limited')
 
         try:
             return handler(data, now)
