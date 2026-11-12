@@ -38,6 +38,9 @@ NAMEPLATE_SMALL_POOL = 999
 NAMEPLATE_FULL_POOL = 9999
 NAMEPLATE_TRIES = 20
 
+TIME_BASE_EPOCH = time.time()
+TIME_BASE_MONOTONIC = time.monotonic()
+
 log = logging.getLogger(__name__)
 
 
@@ -149,12 +152,14 @@ def _client_hash(request) -> str:
 
 
 def _rate_limited(request, op: str) -> bool:
-    limit = settings.RATE_LIMITS.get(op, None)
-    if limit is None:
+    limit = _int(settings.RATE_LIMITS, op)
+    if 0 == limit:
         return False
-    bucket = int(time.monotonic()) // settings.RATE_WINDOW_SECONDS
+    window = max(2, settings.RATE_WINDOW_SECONDS)
+    near_time = TIME_BASE_EPOCH + (time.monotonic() - TIME_BASE_MONOTONIC)
+    bucket = int(near_time // window)
     key = f'rl:{op}:{bucket}:{_client_hash(request)}'
-    cache.add(key, 0, timeout=settings.RATE_WINDOW_SECONDS)
+    cache.add(key, 0, timeout=(1 + window))
     try:
         count = cache.incr(key)
     except ValueError:  # evicted between add and incr; fail open
