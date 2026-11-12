@@ -47,7 +47,7 @@ CACHES = {
     'default': {
         'BACKEND': 'django.core.cache.backends.locmem.LocMemCache',
     },
-    'signaling': {
+    'database': {
         'BACKEND': 'django.core.cache.backends.db.DatabaseCache',
         'LOCATION': 'django_cache_table',
         'OPTIONS': {
@@ -55,6 +55,10 @@ CACHES = {
             'CULL_FREQUENCY': 3,
         },
     }
+}
+CACHES['signaling'] = {}.update(CACHES['database'], {
+    'OPTIONS': dict(CACHES['database']['OPTIONS']),
+    'KEY_PREFIX': 'relay_signaling_',
 }
 
 DATABASES = {
